@@ -4121,6 +4121,15 @@ class DeepAgentsApp(App):
         self._cold_cache_warning_threshold_usd = cold_cache_threshold
         """Minimum estimated cold-versus-warm cost delta that opens the modal."""
 
+        self._cold_cache_suppressed_for_session = False
+        """Whether the user muted the cold-cache warning until app restart.
+
+        Set from the warning modal's "don't warn again this session" choice.
+        Unlike the persisted `[warnings].suppress` entry this is in-memory
+        only; the debug env var (`DEEPAGENTS_CODE_DEBUG_COLD_CACHE`) still
+        bypasses it so the modal stays reachable while developing.
+        """
+
         self._session_cost_warning_shown = False
         """Whether the active thread has already crossed its cost soft limit."""
 
@@ -10568,6 +10577,7 @@ class DeepAgentsApp(App):
             message.mode != "normal"
             or message.origin != "interactive"
             or not model_spec
+            or (self._cold_cache_suppressed_for_session and not debug_forced)
             or (not debug_forced and (threshold <= 0 or timestamp_value is None))
             or (not debug_forced and context_tokens <= 0)
         ):
@@ -10685,10 +10695,13 @@ class DeepAgentsApp(App):
         Raises:
             asyncio.CancelledError: When app shutdown cancels the continuation.
         """
-        from deepagents_code.tui.modals.cold_cache import ColdCacheWarningScreen
+        from deepagents_code.tui.modals.cold_cache import (
+            ColdCacheChoice,
+            ColdCacheWarningScreen,
+        )
 
         try:
-            send = await self._push_screen_wait(
+            choice = await self._push_screen_wait(
                 ColdCacheWarningScreen(
                     policy=warning.policy,
                     estimate=warning.estimate,
@@ -10701,7 +10714,7 @@ class DeepAgentsApp(App):
             raise
         except Exception:
             logger.exception("Failed to show the cold prompt-cache warning")
-            send = True
+            choice = ColdCacheChoice.SEND
 
         if self._exiting:
             return
@@ -10713,10 +10726,51 @@ class DeepAgentsApp(App):
                 markup=False,
             )
             return
-        if send:
+        if choice in {
+            ColdCacheChoice.SEND,
+            ColdCacheChoice.SEND_SUPPRESS_SESSION,
+            ColdCacheChoice.SEND_SUPPRESS_ALWAYS,
+        }:
+            if choice is ColdCacheChoice.SEND_SUPPRESS_SESSION:
+                self._cold_cache_suppressed_for_session = True
+            elif choice is ColdCacheChoice.SEND_SUPPRESS_ALWAYS:
+                await self._suppress_cold_cache_warning()
             await self._process_message(message.text, message.mode)
         else:
             self._restore_cold_cache_draft(message.text)
+
+    async def _suppress_cold_cache_warning(self) -> None:
+        """Persistently suppress the cold-cache warning in `config.toml`.
+
+        Used by the warning modal's "don't warn again ever" choice. The
+        setting can be reverted from the `/notifications` settings screen.
+        """
+        from deepagents_code.model_config import suppress_warning
+
+        # Guarded like the `/notifications` settings persistence: this runs in
+        # a detached continuation ahead of `_process_message`, so an
+        # unexpected raise here would silently drop the submitted message.
+        try:
+            ok = await asyncio.to_thread(suppress_warning, "cold-cache")
+        except Exception:
+            logger.warning("Failed to persist cold-cache suppression", exc_info=True)
+            ok = False
+        if ok:
+            self.notify(
+                "Won't warn about cold prompt caches again. "
+                "Re-enable from /notifications.",
+                severity="information",
+                timeout=6,
+                markup=False,
+            )
+        else:
+            self.notify(
+                "Could not save notification preference. "
+                "Check file permissions for ~/.deepagents/config.toml.",
+                severity="warning",
+                timeout=6,
+                markup=False,
+            )
 
     async def _dispatch_queued_message(self, message: QueuedMessage) -> None:
         """Dispatch one idle message, interposing an advisory cache warning."""
@@ -14352,17 +14406,24 @@ class DeepAgentsApp(App):
         elif cmd == "/help":
             await self._mount_message(UserMessage(command))
             from deepagents_code.command_registry import get_slash_commands
+            from deepagents_code.editor import editor_display_name
 
             command_names = ", ".join(
                 f"{entry.name} {entry.argument_hint}".rstrip()
                 for entry in get_slash_commands()
+            )
+            editor = editor_display_name()
+            editor_help = (
+                f"Open prompt in {editor}"
+                if editor is not None
+                else "Open prompt in external editor"
             )
             help_body = (
                 f"Commands: {command_names}, /skill:<name>\n\n"
                 "Interactive Features:\n"
                 "  Enter           Submit your message\n"
                 f"  {newline_shortcut():<15} Insert newline\n"
-                "  Ctrl+X          Open prompt in external editor\n"
+                f"  Ctrl+X          {editor_help}\n"
                 "  Ctrl+N          Review pending notifications\n"
                 "  Ctrl+\\          Toggle the debug console\n"
                 "  Shift+Tab       Toggle auto-approve mode\n"
@@ -14487,7 +14548,7 @@ class DeepAgentsApp(App):
             success, error = copy_text_to_clipboard(self, content)
             if success:
                 await self._mount_message(
-                    AppMessage("Copied latest assistant message to clipboard."),
+                    AppMessage("Copied latest response to clipboard."),
                 )
             else:
                 fail_msg = (
@@ -20127,8 +20188,7 @@ class DeepAgentsApp(App):
                 else:
                     message = (
                         f"Auto classifier model set to {display}{revalidated}; it "
-                        "reviews gated actions from the next turn and is already "
-                        "the default for future sessions."
+                        "reviews gated actions from the next turn."
                     )
             else:
                 message = (
