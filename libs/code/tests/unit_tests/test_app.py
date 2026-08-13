@@ -36923,11 +36923,13 @@ class TestColdCacheWarningFlow:
             lambda: frozenset({"smith.langchain.com"}),
         )
         app = DeepAgentsApp()
-        # OpenAI wire format routed to an Anthropic model: the gateway
-        # rewrites caching fields, so the OpenAI policy would be fiction.
-        app._model_override = "openai:anthropic/claude-sonnet-4-6"
+        # Anthropic wire format routed to an OpenAI model: the gateway
+        # rewrites caching fields, so the Anthropic policy would be fiction.
+        # The same spec without the `openai/` prefix does resolve a policy on
+        # this host, so a suppressed warning here is the guard's doing.
+        app._model_override = "anthropic:openai/gpt-5.6"
         app._model_params_override = None
-        app._last_cache_model_spec = "openai:anthropic/claude-sonnet-4-6"
+        app._last_cache_model_spec = "anthropic:openai/gpt-5.6"
         app._last_cache_model_params = None
         app._last_model_request_at = (
             datetime.now(UTC) - timedelta(minutes=31)

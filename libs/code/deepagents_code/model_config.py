@@ -582,6 +582,30 @@ LANGSMITH_GATEWAY_PROVIDERS: frozenset[str] = frozenset(
 )
 """Providers whose LangChain integrations support LangSmith LLM Gateway env vars."""
 
+LANGSMITH_GATEWAY_HOST = "smith.langchain.com"
+"""Host identifying LangSmith's managed (SaaS) gateway."""
+
+
+def is_langsmith_gateway_host(host: str | None) -> bool:
+    """Return whether a parsed hostname is the LangSmith managed gateway.
+
+    Matches the host exactly or as a subdomain (org-scoped gateway URLs). The
+    suffix match requires a dot boundary, so `notsmith.langchain.com` does not
+    qualify; a host that merely *contains* the gateway name earlier in the
+    string (`smith.langchain.com.evil.example`) is not a suffix and is
+    likewise rejected.
+
+    Args:
+        host: A parsed, lowercased hostname, or `None` when unparseable.
+
+    Returns:
+        `True` when the host is the gateway or a subdomain of it.
+    """
+    return host is not None and (
+        host == LANGSMITH_GATEWAY_HOST or host.endswith(f".{LANGSMITH_GATEWAY_HOST}")
+    )
+
+
 LANGSMITH_GATEWAY_ENV = "LANGSMITH_GATEWAY"
 LANGSMITH_GATEWAY_API_KEY_ENV = "LANGSMITH_GATEWAY_API_KEY"
 _LANGSMITH_GATEWAY_FALSE_VALUES = frozenset({"false", "0", "no"})

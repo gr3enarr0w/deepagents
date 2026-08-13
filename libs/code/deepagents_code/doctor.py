@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from deepagents_code.model_config import is_langsmith_gateway_host
 from deepagents_code.output import write_json
 
 if TYPE_CHECKING:
@@ -351,20 +352,15 @@ def _sanitize_endpoint(endpoint: str) -> str:
     return f"{parsed.scheme}://{netloc}"
 
 
-_LANGSMITH_GATEWAY_HOST = "smith.langchain.com"
-"""Host identifying LangSmith's managed (SaaS) tracing gateway.
-
-Traces sent to an endpoint whose host is `smith.langchain.com` (or a subdomain
-of it) route through the managed gateway; any other host is a self-hosted or
-dev/staging target. `app.py` keeps the same constant for its model-gateway
-key-mismatch check, but matches a raw-URL substring; this module matches the
-parsed hostname exactly or by subdomain suffix so lookalike hosts such as
-`smith.langchain.com.evil.example` are not treated as the gateway.
-"""
-
-
 def _endpoint_gateway_state(endpoint: str) -> str:
     """Classify a single tracing endpoint as gateway, non-gateway, or unknown.
+
+    Traces sent to the managed gateway host (or a subdomain of it) route
+    through LangSmith SaaS; any other host is a self-hosted or dev/staging
+    target. Host matching is shared with the model-gateway checks via
+    `model_config.is_langsmith_gateway_host`. `app.py` keeps its own copy of
+    the constant for the key-mismatch check, but matches a raw-URL substring
+    rather than a parsed hostname.
 
     Args:
         endpoint: A configured tracing endpoint URL.
@@ -383,7 +379,7 @@ def _endpoint_gateway_state(endpoint: str) -> str:
         return "unknown"
     if not host:
         return "unknown"
-    if host == _LANGSMITH_GATEWAY_HOST or host.endswith(f".{_LANGSMITH_GATEWAY_HOST}"):
+    if is_langsmith_gateway_host(host):
         return "yes"
     return "no"
 

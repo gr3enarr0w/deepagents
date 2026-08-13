@@ -1570,7 +1570,8 @@ _STATIC_OPTIONS: tuple[ConfigOption, ...] = (
         group="Warnings",
         summary=(
             "Alternate endpoint hosts assumed to forward cache settings and "
-            "honor provider cache retention (e.g. 'smith.langchain.com')."
+            "honor provider cache retention "
+            '(e.g. ["smith.langchain.com"]).'
         ),
         kind=OptionKind.STRUCTURED,
         toml_keys=("warnings", "trusted_cache_endpoints"),

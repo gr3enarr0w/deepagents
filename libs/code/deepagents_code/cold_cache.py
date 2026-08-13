@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import dataclass
@@ -9,8 +10,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
+from deepagents_code.model_config import is_langsmith_gateway_host
+
 if TYPE_CHECKING:
     from collections.abc import Collection
+
+logger = logging.getLogger(__name__)
 
 CacheConfidence = Literal["expired", "may_be_cold"]
 CacheWriteBucket = Literal["generic", "5m", "1h"]
@@ -72,8 +77,14 @@ def _official_endpoint(base_url: str | None, hostname: str) -> bool:
 def _endpoint_hostname(base_url: str) -> str | None:
     """Extract a lowercase hostname from an endpoint URL.
 
+    A trailing root dot is removed so the fully-qualified spelling of a host
+    (`smith.langchain.com.`) compares equal to the bare one on both sides of
+    the trust check -- otherwise it would slip past gateway detection while
+    still matching an identically-spelled trust entry.
+
     Returns:
-        The lowercase hostname, or `None` when the URL is unusable.
+        The lowercase hostname, or `None` when the scheme is not `http`/`https`
+        or the host is empty, whitespace-padded, or only a root dot.
     """
     try:
         parsed = urlparse(base_url)
@@ -84,7 +95,40 @@ def _endpoint_hostname(base_url: str) -> str | None:
     host = parsed.hostname
     if not host or host != host.strip():
         return None
-    return host.lower()
+    normalized = host.lower().removesuffix(".")
+    return normalized or None
+
+
+_TRUSTED_HOST = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+"""Shape a trusted-endpoint entry must have once reduced to a hostname.
+
+`urlparse` accepts almost any junk as a host -- `smith.langchain,com` and
+`not a url` both survive it -- which would silently populate the trust set
+with an entry that can never match a real endpoint. Matching this pattern
+instead means a typo is reported rather than stored. IPv6 literals are not
+accepted; a proxy addressed by raw IPv6 must be trusted by DNS name.
+"""
+
+
+def _trusted_entry_hostname(entry: object) -> str | None:
+    """Reduce one configured trust entry to a hostname.
+
+    Args:
+        entry: Raw value from the TOML list; any type, validated here.
+
+    Returns:
+        The lowercase hostname, or `None` when the entry is unusable.
+    """
+    if not isinstance(entry, str) or not entry.strip():
+        return None
+    # Bare hosts are accepted alongside URLs for convenience.
+    candidate = entry.strip()
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    host = _endpoint_hostname(candidate)
+    if host is None or not _TRUSTED_HOST.match(host):
+        return None
+    return host
 
 
 def load_trusted_cache_endpoints(
@@ -94,8 +138,12 @@ def load_trusted_cache_endpoints(
 
     Entries declare that an alternate endpoint forwards cache-affecting request
     fields (`cache_control`, `prompt_cache_key`, `prompt_cache_retention`) and
-    honors the upstream provider's documented retention. Non-string entries are
-    ignored so a hand-edited typo narrows the set instead of failing the read.
+    honors the upstream provider's documented retention.
+
+    Malformed input never raises: an unusable entry is dropped and a value that
+    is not a list is ignored wholesale. Because a dropped entry silently leaves
+    the warning disabled -- the opposite of what the user edited the file to
+    achieve -- every rejection is logged with the offending value.
 
     Args:
         config: Parsed `config.toml` mapping; loaded from disk when omitted.
@@ -111,60 +159,51 @@ def load_trusted_cache_endpoints(
     if not isinstance(warnings_section, dict):
         return frozenset()
     entries = warnings_section.get("trusted_cache_endpoints", [])
+    if entries == []:
+        return frozenset()
     if not isinstance(entries, list):
+        logger.warning(
+            "Ignoring [warnings].trusted_cache_endpoints in config.toml "
+            "(expected a list of hostnames, got %s)",
+            type(entries).__name__,
+        )
         return frozenset()
     hosts: set[str] = set()
     for entry in entries:
-        if not isinstance(entry, str) or not entry.strip():
+        host = _trusted_entry_hostname(entry)
+        if host is None:
+            logger.warning(
+                "Ignoring [warnings].trusted_cache_endpoints entry %r in "
+                "config.toml (expected a hostname or http(s) URL)",
+                entry,
+            )
             continue
-        # Bare hosts are accepted alongside URLs for convenience.
-        candidate = entry.strip()
-        if "://" not in candidate:
-            candidate = f"https://{candidate}"
-        host = _endpoint_hostname(candidate)
-        if host:
-            hosts.add(host)
+        hosts.add(host)
+    if hosts:
+        logger.debug("Trusting cache endpoints: %s", ", ".join(sorted(hosts)))
     return frozenset(hosts)
 
 
-_LANGSMITH_GATEWAY_HOST_SUFFIX = "smith.langchain.com"
-"""Host suffix identifying LangSmith's managed model gateway.
-
-Subdomains (org-scoped gateway URLs) are included; the suffix match still
-requires a dot boundary so a lookalike such as `notsmith.langchain.com` or
-`smith.langchain.com.evil.example` does not qualify.
-"""
-
-_KNOWN_UPSTREAM_PROVIDERS = frozenset({"anthropic", "openai"})
-"""Providers whose models the LangSmith gateway can route cross-format."""
-
-
-def _is_langsmith_gateway_host(host: str | None) -> bool:
-    """Return whether a hostname is the LangSmith managed gateway."""
-    return host is not None and (
-        host == _LANGSMITH_GATEWAY_HOST_SUFFIX
-        or host.endswith(f".{_LANGSMITH_GATEWAY_HOST_SUFFIX}")
-    )
-
-
-def _gateway_cross_format_route(
+def _gateway_effective_model(
     provider: str,
     model_name: str,
     base_url: str | None,
-) -> bool:
-    """Return whether a request will be translated to another API format.
+) -> str | None:
+    """Resolve the model name a policy lookup should use for a gateway route.
 
-    The LangSmith gateway accepts `provider/model` prefixes in the model field
-    to route a request to a different provider than the wire format implies
-    (an OpenAI-format request carrying `anthropic/claude-...`). That hop runs
-    through the gateway's message translators, which normalize every caching
-    signal to Anthropic's plain 5-minute breakpoint (OpenAI → Anthropic) or
-    drop `cache_control` outright (Anthropic → OpenAI) — the provider's
-    documented retention no longer applies, so no policy can be resolved.
+    The LangSmith gateway reads a `provider/model` prefix in the model field to
+    route a request to a provider other than the one the wire format implies
+    (an OpenAI-format request carrying `anthropic/claude-...`). Such a hop is
+    translated between API formats, and translation rewrites or drops the very
+    fields a policy assumes (`cache_control`, `prompt_cache_*`), so the
+    upstream provider's documented retention no longer describes what happens.
 
-    Same-provider routes (including an explicit matching prefix such as
-    `openai/gpt-5.6`) are forwarded untranslated, and a model string without
-    a known-provider prefix is served by the wire format's own provider.
+    Any prefix that does not match the wire-format provider is therefore
+    treated as a crossing, including prefixes for providers this module cannot
+    price -- suppressing a warning is safe, whereas pricing a route whose cache
+    semantics were rewritten is not. A matching prefix (`openai/gpt-5.6` in
+    OpenAI format) is a same-provider route, forwarded untranslated; the prefix
+    is stripped so model-family detection sees the bare name it expects.
 
     Args:
         provider: Wire-format provider from the `provider:model` spec.
@@ -172,17 +211,18 @@ def _gateway_cross_format_route(
         base_url: Resolved endpoint, or `None` for the provider default.
 
     Returns:
-        `True` when the route is known to cross formats, `False` otherwise
-        (including non-gateway endpoints, which apply no translation at all).
+        The model name to price with, or `None` when the route crosses
+        formats. Non-gateway endpoints return the name unchanged -- no
+        translation is detectable there.
     """
-    if provider not in _KNOWN_UPSTREAM_PROVIDERS or not base_url:
-        return False
-    if not _is_langsmith_gateway_host(_endpoint_hostname(base_url)):
-        return False
+    if not base_url or not is_langsmith_gateway_host(_endpoint_hostname(base_url)):
+        return model_name
     if "/" not in model_name:
-        return False
-    prefix = model_name.split("/", 1)[0].strip().lower()
-    return prefix in _KNOWN_UPSTREAM_PROVIDERS and prefix != provider
+        return model_name
+    prefix, remainder = model_name.split("/", 1)
+    if prefix.strip().lower() != provider or not remainder.strip():
+        return None
+    return remainder.strip()
 
 
 def _openai_uses_thirty_minute_cache(model_name: str) -> bool:
@@ -218,11 +258,20 @@ def resolve_prompt_cache_policy(
     """Resolve a documented cache policy for one effective model invocation.
 
     Policies apply only when the endpoint is the provider's official API or a
-    user-declared trusted endpoint (see `load_trusted_cache_endpoints`), and
-    the route stays in the provider's own wire format — a LangSmith gateway
-    route that crosses formats (e.g. an OpenAI-format request routed to an
-    Anthropic model) is never trusted, because translation rewrites or drops
-    the caching fields the policy assumes.
+    user-declared trusted endpoint (see `load_trusted_cache_endpoints`).
+
+    On a LangSmith gateway endpoint, a route that crosses wire formats (e.g. an
+    OpenAI-format request routed to an Anthropic model) resolves nothing,
+    because translation rewrites or drops the caching fields the policy
+    assumes. Cross-format routing through *other* trusted endpoints cannot be
+    detected — declaring an endpoint trusted asserts that it does not do this.
+
+    Args:
+        model_spec: `provider:model` identifier for the invocation.
+        model_params: Request params that affect retention, if any.
+        base_url: Resolved endpoint, or `None` for the provider default.
+        trusted_endpoints: Bare hostnames (not URLs) the user has declared
+            trusted, as returned by `load_trusted_cache_endpoints`.
 
     Returns:
         Matching policy, or `None` when retention cannot be resolved safely.
@@ -236,9 +285,16 @@ def resolve_prompt_cache_policy(
         return None
     params = model_params or {}
 
-    trusted = {host.lower() for host in trusted_endpoints or ()}
-    if base_url and _gateway_cross_format_route(provider, model_name, base_url):
+    # Accept URLs as well as hostnames: the parameter's contract is hostnames,
+    # but a URL here would otherwise be a silent, total no-op.
+    trusted = {
+        _trusted_entry_hostname(host) or host.lower()
+        for host in trusted_endpoints or ()
+    }
+    effective_model = _gateway_effective_model(provider, model_name, base_url)
+    if effective_model is None:
         return None
+    model_name = effective_model
 
     def endpoint_ok(hostname: str) -> bool:
         if _official_endpoint(base_url, hostname):
