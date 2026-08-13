@@ -123,7 +123,7 @@ def test_trusted_endpoints_enable_policies_on_alternate_hosts() -> None:
 
     assert resolve_prompt_cache_policy(
         "openai:gpt-5.6", base_url=gateway, trusted_endpoints=trusted
-    ) == PromptCachePolicy("OpenAI", 1800, "may_be_cold", 1024, "generic")
+    ) == PromptCachePolicy("OpenAI", 1800, "expired", 1024, "generic")
     assert resolve_prompt_cache_policy(
         "anthropic:claude-sonnet-4-6", base_url=gateway, trusted_endpoints=trusted
     ) == PromptCachePolicy("Anthropic", 300, "expired", 1024, "5m")
@@ -145,7 +145,7 @@ def test_langsmith_gateway_same_format_routes_keep_policies() -> None:
     # Bare model names are served by the wire format's own provider.
     assert resolve_prompt_cache_policy(
         "openai:gpt-5.6", base_url=gateway, trusted_endpoints=trusted
-    ) == PromptCachePolicy("OpenAI", 1800, "may_be_cold", 1024, "generic")
+    ) == PromptCachePolicy("OpenAI", 1800, "expired", 1024, "generic")
 
 
 @pytest.mark.parametrize(
