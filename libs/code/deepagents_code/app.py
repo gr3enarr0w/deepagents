@@ -10584,6 +10584,7 @@ class DeepAgentsApp(App):
                 PromptCachePolicy,
                 RewarmEstimate,
                 estimate_rewarm_cost,
+                load_trusted_cache_endpoints,
                 parse_cache_timestamp,
                 resolve_prompt_cache_policy,
             )
@@ -10600,6 +10601,7 @@ class DeepAgentsApp(App):
                 model_spec,
                 current_params,
                 base_url=base_url,
+                trusted_endpoints=load_trusted_cache_endpoints(),
             )
             if debug_forced:
                 if policy is None:

@@ -13,6 +13,7 @@ from deepagents_code.cold_cache import (
     estimate_rewarm_cost,
     format_cache_age,
     format_cache_window,
+    load_trusted_cache_endpoints,
     parse_cache_timestamp,
     resolve_prompt_cache_policy,
 )
@@ -113,6 +114,105 @@ def test_skips_unresolved_or_custom_provider_policies() -> None:
             base_url="https://gateway.example.com",
         )
         is None
+    )
+
+
+def test_trusted_endpoints_enable_policies_on_alternate_hosts() -> None:
+    gateway = "https://gateway.example.com/v1"
+    trusted = {"gateway.example.com"}
+
+    assert resolve_prompt_cache_policy(
+        "openai:gpt-5.6", base_url=gateway, trusted_endpoints=trusted
+    ) == PromptCachePolicy("OpenAI", 1800, "may_be_cold", 1024, "generic")
+    assert resolve_prompt_cache_policy(
+        "anthropic:claude-sonnet-4-6", base_url=gateway, trusted_endpoints=trusted
+    ) == PromptCachePolicy("Anthropic", 300, "expired", 1024, "5m")
+    # A different, untrusted host on the same spec still resolves nothing.
+    assert (
+        resolve_prompt_cache_policy(
+            "openai:gpt-5.6",
+            base_url="https://other.example.com",
+            trusted_endpoints=trusted,
+        )
+        is None
+    )
+
+
+def test_langsmith_gateway_same_format_routes_keep_policies() -> None:
+    gateway = "https://smith.langchain.com"
+    trusted = {"smith.langchain.com"}
+
+    # Bare model names are served by the wire format's own provider.
+    assert resolve_prompt_cache_policy(
+        "openai:gpt-5.6", base_url=gateway, trusted_endpoints=trusted
+    ) == PromptCachePolicy("OpenAI", 1800, "may_be_cold", 1024, "generic")
+
+
+@pytest.mark.parametrize(
+    "model_spec",
+    [
+        # OpenAI wire format routed to an Anthropic model: the gateway
+        # rewrites caching signals to Anthropic's plain 5-minute breakpoint.
+        "openai:anthropic/claude-sonnet-4-6",
+        # Anthropic wire format routed to an OpenAI model: cache_control is
+        # dropped entirely.
+        "anthropic:openai/gpt-5.6",
+    ],
+)
+def test_langsmith_gateway_cross_format_routes_resolve_no_policy(
+    model_spec: str,
+) -> None:
+    gateway = "https://smith.langchain.com"
+
+    assert resolve_prompt_cache_policy(model_spec, base_url=gateway) is None
+    # Trusting the gateway must not resurrect a translated route either.
+    assert (
+        resolve_prompt_cache_policy(
+            model_spec, base_url=gateway, trusted_endpoints={gateway}
+        )
+        is None
+    )
+
+
+def test_gateway_detection_rejects_lookalike_hosts() -> None:
+    for host in (
+        "https://notsmith.langchain.com",
+        "https://smith.langchain.com.evil.example",
+    ):
+        assert (
+            resolve_prompt_cache_policy(
+                "openai:anthropic/claude-sonnet-4-6",
+                base_url=host,
+                trusted_endpoints={"smith.langchain.com", "notsmith.langchain.com"},
+            )
+            is None
+        )
+
+
+def test_load_trusted_cache_endpoints_parses_hosts_and_urls() -> None:
+    config = {
+        "warnings": {
+            "trusted_cache_endpoints": [
+                "https://smith.langchain.com/gw",
+                "gateway.example.com",
+                "",
+                42,
+                "not a url at all ::",
+            ]
+        }
+    }
+
+    assert load_trusted_cache_endpoints(config) == frozenset(
+        {"smith.langchain.com", "gateway.example.com"}
+    )
+
+
+def test_load_trusted_cache_endpoints_tolerates_missing_or_malformed() -> None:
+    assert load_trusted_cache_endpoints({}) == frozenset()
+    assert load_trusted_cache_endpoints({"warnings": []}) == frozenset()
+    assert (
+        load_trusted_cache_endpoints({"warnings": {"trusted_cache_endpoints": "x"}})
+        == frozenset()
     )
 
 

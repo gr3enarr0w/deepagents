@@ -36813,6 +36813,100 @@ class TestColdCacheWarningFlow:
         assert warning.estimate.incremental_cost_usd == pytest.approx(0.25)
         assert warning.identity_changed is False
 
+    async def test_trusted_gateway_endpoint_allows_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A configured trusted endpoint re-enables warnings behind a proxy."""
+        app = DeepAgentsApp()
+        app._model_override = "openai:gpt-5.6"
+        app._model_params_override = None
+        app._last_cache_model_spec = "openai:gpt-5.6"
+        app._last_cache_model_params = None
+        app._last_model_request_at = (
+            datetime.now(UTC) - timedelta(minutes=31)
+        ).isoformat()
+        app._context_tokens = 50_000
+        app._cold_cache_warning_threshold_usd = 0.10
+        config = MagicMock()
+        config.get_base_url.return_value = "https://smith.langchain.com/gw"
+
+        def estimate(
+            usage: dict[str, Any],
+            _model: str,
+            _provider: str,
+        ) -> float:
+            details = usage["input_token_details"]
+            return 0.10 if "cache_read" in details else 0.35
+
+        def run_with_trusted(
+            trusted: list[str],
+        ) -> Coroutine[Any, Any, _ColdCacheWarning | None]:
+            monkeypatch.setattr(
+                "deepagents_code.cold_cache.load_trusted_cache_endpoints",
+                lambda: frozenset(trusted),
+            )
+            return app._cold_cache_warning_for(QueuedMessage("continue", "normal"))
+
+        with (
+            patch(
+                "deepagents_code.model_config.ModelConfig.load",
+                return_value=config,
+            ),
+            patch(
+                "deepagents_code.model_config.is_warning_suppressed",
+                return_value=False,
+            ),
+            patch("deepagents_code.cost_tracking.estimate_cost", estimate),
+        ):
+            # Untrusted gateway: no policy, no warning.
+            assert await run_with_trusted([]) is None
+            warning = await run_with_trusted(["smith.langchain.com"])
+
+        assert warning is not None
+        assert warning.policy.provider_name == "OpenAI"
+        assert warning.estimate.incremental_cost_usd == pytest.approx(0.25)
+
+    async def test_gateway_cross_format_route_suppresses_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gateway route that translates wire formats never warns."""
+        monkeypatch.setattr(
+            "deepagents_code.cold_cache.load_trusted_cache_endpoints",
+            lambda: frozenset({"smith.langchain.com"}),
+        )
+        app = DeepAgentsApp()
+        # OpenAI wire format routed to an Anthropic model: the gateway
+        # rewrites caching fields, so the OpenAI policy would be fiction.
+        app._model_override = "openai:anthropic/claude-sonnet-4-6"
+        app._model_params_override = None
+        app._last_cache_model_spec = "openai:anthropic/claude-sonnet-4-6"
+        app._last_cache_model_params = None
+        app._last_model_request_at = (
+            datetime.now(UTC) - timedelta(minutes=31)
+        ).isoformat()
+        app._context_tokens = 50_000
+        app._cold_cache_warning_threshold_usd = 0.10
+        config = MagicMock()
+        config.get_base_url.return_value = "https://smith.langchain.com/gw"
+
+        with (
+            patch(
+                "deepagents_code.model_config.ModelConfig.load",
+                return_value=config,
+            ),
+            patch(
+                "deepagents_code.model_config.is_warning_suppressed",
+                return_value=False,
+            ),
+        ):
+            warning = await app._cold_cache_warning_for(
+                QueuedMessage("continue", "normal")
+            )
+
+        assert warning is None
+
     async def test_external_message_never_opens_warning(self) -> None:
         app = DeepAgentsApp()
         app._cold_cache_warning_threshold_usd = 0.10

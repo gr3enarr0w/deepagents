@@ -6,8 +6,11 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 CacheConfidence = Literal["expired", "may_be_cold"]
 CacheWriteBucket = Literal["generic", "5m", "1h"]
@@ -66,6 +69,122 @@ def _official_endpoint(base_url: str | None, hostname: str) -> bool:
     return parsed.scheme in {"http", "https"} and parsed.hostname == hostname
 
 
+def _endpoint_hostname(base_url: str) -> str | None:
+    """Extract a lowercase hostname from an endpoint URL.
+
+    Returns:
+        The lowercase hostname, or `None` when the URL is unusable.
+    """
+    try:
+        parsed = urlparse(base_url)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = parsed.hostname
+    if not host or host != host.strip():
+        return None
+    return host.lower()
+
+
+def load_trusted_cache_endpoints(
+    config: dict[str, Any] | None = None,
+) -> frozenset[str]:
+    """Read `[warnings].trusted_cache_endpoints` as a set of hostnames.
+
+    Entries declare that an alternate endpoint forwards cache-affecting request
+    fields (`cache_control`, `prompt_cache_key`, `prompt_cache_retention`) and
+    honors the upstream provider's documented retention. Non-string entries are
+    ignored so a hand-edited typo narrows the set instead of failing the read.
+
+    Args:
+        config: Parsed `config.toml` mapping; loaded from disk when omitted.
+
+    Returns:
+        Lowercase hostnames of user-trusted endpoints (possibly empty).
+    """
+    if config is None:
+        from deepagents_code.config_manifest import load_config_toml
+
+        config = load_config_toml()
+    warnings_section = config.get("warnings", {})
+    if not isinstance(warnings_section, dict):
+        return frozenset()
+    entries = warnings_section.get("trusted_cache_endpoints", [])
+    if not isinstance(entries, list):
+        return frozenset()
+    hosts: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        # Bare hosts are accepted alongside URLs for convenience.
+        candidate = entry.strip()
+        if "://" not in candidate:
+            candidate = f"https://{candidate}"
+        host = _endpoint_hostname(candidate)
+        if host:
+            hosts.add(host)
+    return frozenset(hosts)
+
+
+_LANGSMITH_GATEWAY_HOST_SUFFIX = "smith.langchain.com"
+"""Host suffix identifying LangSmith's managed model gateway.
+
+Subdomains (org-scoped gateway URLs) are included; the suffix match still
+requires a dot boundary so a lookalike such as `notsmith.langchain.com` or
+`smith.langchain.com.evil.example` does not qualify.
+"""
+
+_KNOWN_UPSTREAM_PROVIDERS = frozenset({"anthropic", "openai"})
+"""Providers whose models the LangSmith gateway can route cross-format."""
+
+
+def _is_langsmith_gateway_host(host: str | None) -> bool:
+    """Return whether a hostname is the LangSmith managed gateway."""
+    return host is not None and (
+        host == _LANGSMITH_GATEWAY_HOST_SUFFIX
+        or host.endswith(f".{_LANGSMITH_GATEWAY_HOST_SUFFIX}")
+    )
+
+
+def _gateway_cross_format_route(
+    provider: str,
+    model_name: str,
+    base_url: str | None,
+) -> bool:
+    """Return whether a request will be translated to another API format.
+
+    The LangSmith gateway accepts `provider/model` prefixes in the model field
+    to route a request to a different provider than the wire format implies
+    (an OpenAI-format request carrying `anthropic/claude-...`). That hop runs
+    through the gateway's message translators, which normalize every caching
+    signal to Anthropic's plain 5-minute breakpoint (OpenAI → Anthropic) or
+    drop `cache_control` outright (Anthropic → OpenAI) — the provider's
+    documented retention no longer applies, so no policy can be resolved.
+
+    Same-provider routes (including an explicit matching prefix such as
+    `openai/gpt-5.6`) are forwarded untranslated, and a model string without
+    a known-provider prefix is served by the wire format's own provider.
+
+    Args:
+        provider: Wire-format provider from the `provider:model` spec.
+        model_name: Model portion of the spec, as sent to the gateway.
+        base_url: Resolved endpoint, or `None` for the provider default.
+
+    Returns:
+        `True` when the route is known to cross formats, `False` otherwise
+        (including non-gateway endpoints, which apply no translation at all).
+    """
+    if provider not in _KNOWN_UPSTREAM_PROVIDERS or not base_url:
+        return False
+    if not _is_langsmith_gateway_host(_endpoint_hostname(base_url)):
+        return False
+    if "/" not in model_name:
+        return False
+    prefix = model_name.split("/", 1)[0].strip().lower()
+    return prefix in _KNOWN_UPSTREAM_PROVIDERS and prefix != provider
+
+
 def _openai_uses_thirty_minute_cache(model_name: str) -> bool:
     """Return whether an OpenAI model belongs to the GPT-5.6-or-newer family."""
     match = _OPENAI_MODEL_VERSION.match(model_name.lower())
@@ -94,8 +213,16 @@ def resolve_prompt_cache_policy(
     model_params: dict[str, Any] | None = None,
     *,
     base_url: str | None = None,
+    trusted_endpoints: Collection[str] | None = None,
 ) -> PromptCachePolicy | None:
     """Resolve a documented cache policy for one effective model invocation.
+
+    Policies apply only when the endpoint is the provider's official API or a
+    user-declared trusted endpoint (see `load_trusted_cache_endpoints`), and
+    the route stays in the provider's own wire format — a LangSmith gateway
+    route that crosses formats (e.g. an OpenAI-format request routed to an
+    Anthropic model) is never trusted, because translation rewrites or drops
+    the caching fields the policy assumes.
 
     Returns:
         Matching policy, or `None` when retention cannot be resolved safely.
@@ -109,8 +236,19 @@ def resolve_prompt_cache_policy(
         return None
     params = model_params or {}
 
+    trusted = {host.lower() for host in trusted_endpoints or ()}
+    if base_url and _gateway_cross_format_route(provider, model_name, base_url):
+        return None
+
+    def endpoint_ok(hostname: str) -> bool:
+        if _official_endpoint(base_url, hostname):
+            return True
+        if not base_url or not trusted:
+            return False
+        return _endpoint_hostname(base_url) in trusted
+
     if provider == "anthropic":
-        if not _official_endpoint(base_url, "api.anthropic.com"):
+        if not endpoint_ok("api.anthropic.com"):
             return None
         minimum = _anthropic_minimum_tokens(model_name)
         cache_control = params.get("cache_control")
@@ -119,7 +257,7 @@ def resolve_prompt_cache_policy(
             return PromptCachePolicy("Anthropic", 3600, "expired", minimum, "1h")
         return PromptCachePolicy("Anthropic", 300, "expired", minimum, "5m")
 
-    if provider != "openai" or not _official_endpoint(base_url, "api.openai.com"):
+    if provider != "openai" or not endpoint_ok("api.openai.com"):
         return None
     if _openai_uses_thirty_minute_cache(model_name):
         # 30 minutes is the documented guaranteed minimum for GPT-5.6+; past

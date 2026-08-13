@@ -1566,6 +1566,16 @@ _STATIC_OPTIONS: tuple[ConfigOption, ...] = (
         toml_keys=("warnings", "cold_cache_min_delta_usd"),
     ),
     ConfigOption(
+        key="warnings.trusted_cache_endpoints",
+        group="Warnings",
+        summary=(
+            "Alternate endpoint hosts assumed to forward cache settings and "
+            "honor provider cache retention (e.g. 'smith.langchain.com')."
+        ),
+        kind=OptionKind.STRUCTURED,
+        toml_keys=("warnings", "trusted_cache_endpoints"),
+    ),
+    ConfigOption(
         key="warnings.session_cost_threshold_usd",
         group="Warnings",
         summary=(
