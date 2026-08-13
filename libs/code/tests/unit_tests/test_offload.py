@@ -336,11 +336,16 @@ class TestOffloadSuccess:
                 await pilot.pause()
 
             msgs = app.query(AppMessage)
-            # Offloaded count is the new cutoff of four minus a prior cutoff of zero.
-            assert any("Offloaded 4 older messages" in str(w._content) for w in msgs)
-            # Three human turns remain after the cutoff; assistant messages are ignored.
-            assert any("3 conversation turns kept" in str(w._content) for w in msgs)
-            assert any("Conversation: ~" in str(w._content) for w in msgs)
+            assert any(
+                "Offloaded 4 older messages (2 conversation turns)"
+                in str(widget._content)
+                for widget in msgs
+            )
+            assert any(
+                "6 messages (3 conversation turns) kept" in str(widget._content)
+                for widget in msgs
+            )
+            assert any("Conversation: ~" in str(widget._content) for widget in msgs)
 
     async def test_kept_turns_ignore_tools_and_internal_messages(self) -> None:
         """Kept turns should count user prompts, not provider message envelopes."""
@@ -397,9 +402,15 @@ class TestOffloadSuccess:
                 await app._handle_offload()
                 await pilot.pause()
 
+            messages = app.query(AppMessage)
             assert any(
-                "1 conversation turn kept" in str(widget._content)
-                for widget in app.query(AppMessage)
+                "Offloaded 4 older messages (1 conversation turn)"
+                in str(widget._content)
+                for widget in messages
+            )
+            assert any(
+                "5 messages (1 conversation turn) kept" in str(widget._content)
+                for widget in messages
             )
 
     async def test_offload_updates_context_tokens(self) -> None:
@@ -640,7 +651,7 @@ class TestOffloadEdgeCases:
                 await pilot.pause()
 
             msgs = app.query(AppMessage)
-            assert any("Offloaded 1 older messages" in str(w._content) for w in msgs)
+            assert any("Offloaded 1 older message" in str(w._content) for w in msgs)
 
 
 class TestReOffload:

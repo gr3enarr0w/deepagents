@@ -632,6 +632,14 @@ class MessageStore:
         return len(self._messages)
 
     @property
+    def turn_count(self) -> int:
+        """Number of user turns stored."""
+        return sum(
+            message.type in {MessageType.USER, MessageType.SKILL}
+            for message in self._messages
+        )
+
+    @property
     def visible_count(self) -> int:
         """Number of messages currently visible (as widgets)."""
         return self._visible_end - self._visible_start
