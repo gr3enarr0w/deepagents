@@ -309,7 +309,7 @@ class TestOffloadSuccess:
             )
 
     async def test_offload_shows_feedback_message(self) -> None:
-        """Should display feedback with message count and token change."""
+        """Should display feedback with conversation turns and token change."""
         app = DeepAgentsApp()
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -338,8 +338,69 @@ class TestOffloadSuccess:
             msgs = app.query(AppMessage)
             # Offloaded count is the new cutoff of four minus a prior cutoff of zero.
             assert any("Offloaded 4 older messages" in str(w._content) for w in msgs)
-            # Kept count is the ten before-messages minus the new cutoff of four.
-            assert any("6 messages kept" in str(w._content) for w in msgs)
+            # Three human turns remain after the cutoff; assistant messages are ignored.
+            assert any("3 conversation turns kept" in str(w._content) for w in msgs)
+            assert any("Conversation: ~" in str(w._content) for w in msgs)
+
+    async def test_kept_turns_ignore_tools_and_internal_messages(self) -> None:
+        """Kept turns should count user prompts, not provider message envelopes."""
+        app = DeepAgentsApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _setup_server_offload_app(app)
+
+            before_messages = [
+                {"type": "human", "content": "Old prompt", "id": "old-human"},
+                {"type": "ai", "content": "", "id": "old-tool-call"},
+                {
+                    "type": "tool",
+                    "content": "Old result",
+                    "id": "old-tool",
+                    "tool_call_id": "old-call",
+                },
+                {"type": "ai", "content": "Old answer", "id": "old-ai"},
+                {"role": "user", "content": "Kept prompt", "id": "kept-human"},
+                {"role": "assistant", "content": "", "id": "kept-tool-call"},
+                {
+                    "type": "tool",
+                    "content": "Kept result",
+                    "id": "kept-tool",
+                    "tool_call_id": "kept-call",
+                },
+                {"role": "assistant", "content": "Kept answer", "id": "kept-ai"},
+                {
+                    "type": "human",
+                    "content": "Internal state",
+                    "id": "internal-human",
+                    "additional_kwargs": {"lc_source": "goal_state"},
+                },
+            ]
+            before = _state_values(before_messages)
+            after = _state_values(
+                [*before_messages, *_make_dict_messages(2)], _summary_event(4)
+            )
+
+            with (
+                patch.object(
+                    app,
+                    "_get_thread_state_values",
+                    new_callable=AsyncMock,
+                    side_effect=[before, after],
+                ),
+                patch.object(
+                    app,
+                    "_drive_server_side_compaction",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
+            ):
+                await app._handle_offload()
+                await pilot.pause()
+
+            assert any(
+                "1 conversation turn kept" in str(widget._content)
+                for widget in app.query(AppMessage)
+            )
 
     async def test_offload_updates_context_tokens(self) -> None:
         """Should update `_context_tokens` to the post-compaction count.
@@ -387,6 +448,60 @@ class TestOffloadSuccess:
                 await pilot.pause()
 
             assert app._context_tokens == expected
+
+    async def test_offload_preserves_fixed_overhead_in_context_report(self) -> None:
+        """Provider totals should keep fixed overhead in the post-offload estimate."""
+        from langchain_core.messages.utils import count_tokens_approximately
+
+        from deepagents_code.app import _effective_conversation
+
+        app = DeepAgentsApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _setup_server_offload_app(app)
+
+            before_messages = _make_dict_messages(10)
+            after_event = _summary_event(4)
+            conversation_before = count_tokens_approximately(before_messages)
+            conversation_after = count_tokens_approximately(
+                _effective_conversation(before_messages, after_event)
+            )
+            fixed_tokens = 50_000
+            reported_before = conversation_before + fixed_tokens
+            expected_after = conversation_after + fixed_tokens
+            before = _state_values(before_messages)
+            before["_context_tokens"] = reported_before
+            after = _state_values(
+                [*before_messages, *_make_dict_messages(2)], after_event
+            )
+
+            with (
+                patch.object(
+                    app,
+                    "_get_thread_state_values",
+                    new_callable=AsyncMock,
+                    side_effect=[before, after],
+                ),
+                patch.object(
+                    app,
+                    "_drive_server_side_compaction",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
+            ):
+                await app._handle_offload()
+                await pilot.pause()
+
+            expected_report = (
+                f"Context: {format_token_count(reported_before)} → "
+                f"~{format_token_count(expected_after)} tokens"
+            )
+            assert any(
+                expected_report in str(widget._content)
+                for widget in app.query(AppMessage)
+            )
+            assert app._context_tokens == expected_after
+            assert app._tokens_approximate is True
 
     async def test_no_ui_clear_reload(self) -> None:
         """Should NOT clear/reload UI since messages stay in state."""

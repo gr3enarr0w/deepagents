@@ -15043,9 +15043,10 @@ class DeepAgentsApp(App):
             prior_event = state_values.get("_summarization_event")
             before_messages = state_values.get("messages", [])
             prior_cutoff = _summarization_cutoff(prior_event)
-            tokens_before = count_tokens_approximately(
+            conversation_tokens_before = count_tokens_approximately(
                 _effective_conversation(before_messages, prior_event)
             )
+            reported_tokens_before = _persisted_context_tokens(state_values)
 
             # Own the seeded tool-call id here so a failed run can clean up the
             # committed-but-unanswered seed (see `_remove_unanswered_offload_seed`).
@@ -15145,40 +15146,44 @@ class DeepAgentsApp(App):
                 if isinstance(new_event, dict)
                 else getattr(new_event, "file_path", None)
             )
-            # Recompute the post-offload size from the ORIGINAL pre-seed
-            # messages plus the new event. `_effective_conversation` yields
-            # `[summary, *before_messages[new_cutoff:]]` — the compacted
-            # conversation without the tool's own machinery (the seeded tool
-            # call, the tool result, and the trailing model turn), all of which
-            # land in `new_state["messages"]` at/after `new_cutoff`. Counting
-            # `before_messages` keeps this token figure consistent with the
-            # message counts below and avoids understating the reduction.
-            #
-            # This is a client-side approximation for the status bar and is
-            # deliberately not the persisted `_context_tokens` (refreshed from
-            # the trailing turn's real provider usage, which includes
-            # system/tool overhead and the machinery messages). The two can
-            # differ, and if the trailing turn failed `_context_tokens` keeps
-            # its pre-offload value.
-            tokens_after = count_tokens_approximately(
+            # Recompute the post-offload conversation from the original pre-seed
+            # messages plus the new event. This excludes the compact tool's own
+            # machinery while preserving the provider-reported system/tool overhead
+            # from the last ordinary turn when that total is available.
+            conversation_tokens_after = count_tokens_approximately(
                 _effective_conversation(before_messages, new_event)
             )
-            # Message counts are likewise derived purely from the absolute
-            # cutoffs, so those same machinery artifacts are never mistaken for
-            # kept conversation.
+            if reported_tokens_before:
+                fixed_tokens = max(
+                    0, reported_tokens_before - conversation_tokens_before
+                )
+                tokens_before = reported_tokens_before
+                tokens_after = fixed_tokens + conversation_tokens_after
+                usage_label = "Context"
+                before = format_token_count(tokens_before)
+                after = f"~{format_token_count(tokens_after)}"
+            else:
+                tokens_before = conversation_tokens_before
+                tokens_after = conversation_tokens_after
+                usage_label = "Conversation"
+                before = f"~{format_token_count(tokens_before)}"
+                after = f"~{format_token_count(tokens_after)}"
+
             messages_offloaded = max(0, new_cutoff - prior_cutoff)
-            messages_kept = max(0, len(before_messages) - new_cutoff)
+            turns_kept = sum(
+                is_human_message(message) and not is_internal_message(message)
+                for message in before_messages[new_cutoff:]
+            )
+            turn_label = "turn" if turns_kept == 1 else "turns"
             pct = (
                 round((tokens_before - tokens_after) / tokens_before * 100)
                 if tokens_before > 0
                 else 0
             )
 
-            before = format_token_count(tokens_before)
-            after = format_token_count(tokens_after)
             stats_line = (
-                f"Context: {before} → {after} tokens "
-                f"({pct}% decrease), {messages_kept} messages kept."
+                f"{usage_label}: {before} → {after} tokens "
+                f"({pct}% decrease), {turns_kept} conversation {turn_label} kept."
             )
             if archive_path:
                 from deepagents_code.offload import offload_storage_is_ephemeral
