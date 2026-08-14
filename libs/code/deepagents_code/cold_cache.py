@@ -82,7 +82,8 @@ def _normalized_endpoint_cache_identity(base_url: str) -> str | None:
     if port is not None and port != _DEFAULT_ENDPOINT_PORTS[scheme]:
         authority = f"{hostname}:{port}"
     path = parsed.path.rstrip("/")
-    return f"{scheme}://{authority}{path}"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{scheme}://{authority}{path}{query}"
 
 
 def endpoint_cache_identity(base_url: str | None) -> str:
@@ -90,8 +91,8 @@ def endpoint_cache_identity(base_url: str | None) -> str:
 
     A missing endpoint means the provider's default API. URL spelling details
     that do not select a different server (case, a trailing slash, a default
-    port, query parameters, and fragments) are normalized away. The path is
-    retained because proxies can route different paths to separate backends.
+    port, and fragments) are normalized away. The path and query are retained
+    because proxies can route them to separate backends.
 
     Args:
         base_url: Resolved provider endpoint, or `None` for its default API.

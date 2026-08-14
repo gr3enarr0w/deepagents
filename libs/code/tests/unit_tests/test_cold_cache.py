@@ -27,7 +27,7 @@ from deepagents_code.cold_cache import (
         (None, "default"),
         (
             "https://Proxy.EXAMPLE.com:443/v1/?ignored=yes#fragment",
-            "https://proxy.example.com/v1",
+            "https://proxy.example.com/v1?ignored=yes",
         ),
         ("http://proxy.example.com:8080/v1/", "http://proxy.example.com:8080/v1"),
         ("not a URL", "invalid:not a URL"),
@@ -37,6 +37,14 @@ def test_endpoint_cache_identity_normalizes_endpoint_spelling(
     base_url: str | None, expected: str
 ) -> None:
     assert endpoint_cache_identity(base_url) == expected
+
+
+def test_endpoint_cache_identity_preserves_query_routing() -> None:
+    """Query changes must not be treated as sharing a prompt cache."""
+    tenant_a = endpoint_cache_identity("https://proxy.example.com/v1?tenant=a")
+    tenant_b = endpoint_cache_identity("https://proxy.example.com/v1?tenant=b")
+
+    assert tenant_a != tenant_b
 
 
 def test_resolves_anthropic_default_and_one_hour_policies() -> None:
