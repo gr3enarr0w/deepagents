@@ -11,6 +11,7 @@ import pytest
 from deepagents_code.cold_cache import (
     CacheWriteBucket,
     PromptCachePolicy,
+    endpoint_cache_identity,
     estimate_rewarm_cost,
     format_cache_age,
     format_cache_window,
@@ -18,6 +19,24 @@ from deepagents_code.cold_cache import (
     parse_cache_timestamp,
     resolve_prompt_cache_policy,
 )
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (None, "default"),
+        (
+            "https://Proxy.EXAMPLE.com:443/v1/?ignored=yes#fragment",
+            "https://proxy.example.com/v1",
+        ),
+        ("http://proxy.example.com:8080/v1/", "http://proxy.example.com:8080/v1"),
+        ("not a URL", "invalid:not a URL"),
+    ],
+)
+def test_endpoint_cache_identity_normalizes_endpoint_spelling(
+    base_url: str | None, expected: str
+) -> None:
+    assert endpoint_cache_identity(base_url) == expected
 
 
 def test_resolves_anthropic_default_and_one_hour_policies() -> None:

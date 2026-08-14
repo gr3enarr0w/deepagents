@@ -36913,6 +36913,52 @@ class TestColdCacheWarningFlow:
         assert warning.policy.provider_name == "OpenAI"
         assert warning.estimate.incremental_cost_usd == pytest.approx(0.25)
 
+    async def test_endpoint_change_prevents_warm_cache_reuse(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Switching endpoints warns even while the previous cache is fresh."""
+        monkeypatch.setattr(
+            "deepagents_code.cold_cache.load_trusted_cache_endpoints",
+            lambda: frozenset({"smith.langchain.com"}),
+        )
+        app = DeepAgentsApp()
+        app._model_override = "openai:gpt-5.6"
+        app._last_cache_model_spec = "openai:gpt-5.6"
+        app._last_cache_model_params = None
+        app._last_cache_endpoint = "default"
+        app._last_model_request_at = datetime.now(UTC).isoformat()
+        app._context_tokens = 50_000
+        app._cold_cache_warning_threshold_usd = 0.10
+        config = MagicMock()
+        config.get_base_url.return_value = "https://smith.langchain.com/gw/"
+
+        def estimate(
+            usage: dict[str, Any],
+            _model: str,
+            _provider: str,
+        ) -> float:
+            details = usage["input_token_details"]
+            return 0.10 if "cache_read" in details else 0.35
+
+        with (
+            patch(
+                "deepagents_code.model_config.ModelConfig.load",
+                return_value=config,
+            ),
+            patch(
+                "deepagents_code.model_config.is_warning_suppressed",
+                return_value=False,
+            ),
+            patch("deepagents_code.cost_tracking.estimate_cost", estimate),
+        ):
+            warning = await app._cold_cache_warning_for(
+                QueuedMessage("continue", "normal")
+            )
+
+        assert warning is not None
+        assert warning.identity_changed is True
+
     async def test_gateway_cross_format_route_suppresses_warning(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -37365,6 +37411,7 @@ class TestColdCacheWarningFlow:
             {
                 "_last_model_request_at": "2026-08-11T12:30:00+00:00",
                 "_last_cache_model_spec": "anthropic:claude-sonnet-4-6",
+                "_last_cache_endpoint": "https://api.anthropic.com/v1",
                 "_model_spec": "anthropic:claude-sonnet-4-6",
                 "_model_params": {"cache_control": {"ttl": "1h"}},
             }
@@ -37373,6 +37420,7 @@ class TestColdCacheWarningFlow:
         assert app._last_model_request_at == "2026-08-11T12:30:00+00:00"
         assert app._last_cache_model_spec == "anthropic:claude-sonnet-4-6"
         assert app._last_cache_model_params == {"cache_control": {"ttl": "1h"}}
+        assert app._last_cache_endpoint == "https://api.anthropic.com/v1"
 
     def test_checkpoint_sync_warns_on_malformed_request_time(
         self,

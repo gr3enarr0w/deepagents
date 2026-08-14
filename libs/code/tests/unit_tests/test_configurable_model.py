@@ -74,6 +74,8 @@ def _checkpoint_update(
     assert isinstance(timestamp, str)
     cache_model_spec = update.pop("_last_cache_model_spec")
     assert isinstance(cache_model_spec, str)
+    cache_endpoint = update.pop("_last_cache_endpoint")
+    assert isinstance(cache_endpoint, str)
     return update
 
 
@@ -126,6 +128,7 @@ class TestCheckpointPersistence:
         assert isinstance(update, dict)
         assert update["_last_model_request_at"] == "2026-08-11T12:30:00+00:00"
         assert update["_last_cache_model_spec"] == "openai:gpt-5.6"
+        assert update["_last_cache_endpoint"] == "default"
 
     def test_failed_call_does_not_return_checkpoint_update(self) -> None:
         middleware = ConfigurableModelMiddleware(openai_prompt_cache_key=True)

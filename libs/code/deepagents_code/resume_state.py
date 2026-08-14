@@ -210,6 +210,9 @@ class ResumeState(GoalRubricChannels):
     _last_cache_model_spec: Annotated[NotRequired[str], PrivateStateAttr]
     """Requested model spec associated with `_last_model_request_at`."""
 
+    _last_cache_endpoint: Annotated[NotRequired[str], PrivateStateAttr]
+    """Normalized endpoint identity associated with `_last_model_request_at`."""
+
     _pending_goal_objective: Annotated[NotRequired[str | None], PrivateStateAttr]
     """Goal objective awaiting acceptance of proposed criteria."""
 

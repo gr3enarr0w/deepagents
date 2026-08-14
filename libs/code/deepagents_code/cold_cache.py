@@ -21,6 +21,7 @@ CacheConfidence = Literal["expired", "may_be_cold"]
 CacheWriteBucket = Literal["generic", "5m", "1h"]
 
 _OPENAI_MODEL_VERSION = re.compile(r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?")
+_DEFAULT_ENDPOINT_PORTS = {"http": 80, "https": 443}
 
 _ANTHROPIC_MINIMUM_TOKENS: tuple[tuple[str, int], ...] = (
     ("claude-opus-5", 512),
@@ -61,6 +62,55 @@ class RewarmEstimate:
 
     cold_cost_usd: float
     incremental_cost_usd: float
+
+
+def _normalized_endpoint_cache_identity(base_url: str) -> str | None:
+    """Normalize a valid HTTP endpoint, if possible.
+
+    Returns:
+        The normalized endpoint identity, or `None` when `base_url` is not an
+        HTTP URL with a hostname.
+    """
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        return None
+    scheme = parsed.scheme.lower()
+    hostname = host.lower().removesuffix(".")
+    port = parsed.port
+    authority = hostname
+    if port is not None and port != _DEFAULT_ENDPOINT_PORTS[scheme]:
+        authority = f"{hostname}:{port}"
+    path = parsed.path.rstrip("/")
+    return f"{scheme}://{authority}{path}"
+
+
+def endpoint_cache_identity(base_url: str | None) -> str:
+    """Return a stable identity for the endpoint that owns a prompt cache.
+
+    A missing endpoint means the provider's default API. URL spelling details
+    that do not select a different server (case, a trailing slash, a default
+    port, query parameters, and fragments) are normalized away. The path is
+    retained because proxies can route different paths to separate backends.
+
+    Args:
+        base_url: Resolved provider endpoint, or `None` for its default API.
+
+    Returns:
+        A checkpoint-safe endpoint identity.
+    """
+    if base_url is None or not base_url.strip():
+        return "default"
+    try:
+        normalized = _normalized_endpoint_cache_identity(base_url.strip())
+    except ValueError:
+        # Preserve malformed values as distinct identities. This is deliberately
+        # conservative: a bad endpoint must never be considered cache-equivalent
+        # to the provider default or to a valid endpoint.
+        return f"invalid:{base_url.strip()}"
+    if normalized is not None:
+        return normalized
+    return f"invalid:{base_url.strip()}"
 
 
 def _official_endpoint(base_url: str | None, hostname: str) -> bool:

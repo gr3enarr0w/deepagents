@@ -4078,6 +4078,9 @@ class DeepAgentsApp(App):
         self._last_cache_model_params: dict[str, Any] | None = None
         """Model params associated with `_last_model_request_at`."""
 
+        self._last_cache_endpoint: str | None = None
+        """Endpoint identity associated with `_last_model_request_at`."""
+
         self._tokens_approximate: bool = False
         """Whether the cached token count is stale (interrupted generation)."""
 
@@ -7916,6 +7919,7 @@ class DeepAgentsApp(App):
         self._last_model_request_at = None
         self._last_cache_model_spec = ""
         self._last_cache_model_params = None
+        self._last_cache_endpoint = None
         self._session_cost_warning_shown = False
         self._set_session_cost(self._thread_restored_cost_usd)
 
@@ -8205,6 +8209,10 @@ class DeepAgentsApp(App):
         raw_params = state_values.get("_model_params")
         self._last_cache_model_params = (
             dict(raw_params) if isinstance(raw_params, dict) else None
+        )
+        raw_endpoint = state_values.get("_last_cache_endpoint")
+        self._last_cache_endpoint = (
+            raw_endpoint if isinstance(raw_endpoint, str) else None
         )
 
     async def _sync_session_cost_from_checkpoint(self) -> None:
@@ -10599,6 +10607,7 @@ class DeepAgentsApp(App):
         current_params = self._model_params_override or None
         last_spec = self._last_cache_model_spec
         last_params = self._last_cache_model_params
+        last_endpoint = self._last_cache_endpoint
 
         def _evaluate() -> _ColdCacheWarning | None:
             from datetime import UTC, datetime
@@ -10606,6 +10615,7 @@ class DeepAgentsApp(App):
             from deepagents_code.cold_cache import (
                 PromptCachePolicy,
                 RewarmEstimate,
+                endpoint_cache_identity,
                 estimate_rewarm_cost,
                 load_trusted_cache_endpoints,
                 parse_cache_timestamp,
@@ -10620,6 +10630,7 @@ class DeepAgentsApp(App):
                 return None
             provider = model_spec.split(":", 1)[0]
             base_url = ModelConfig.load().get_base_url(provider)
+            endpoint = endpoint_cache_identity(base_url)
             policy = resolve_prompt_cache_policy(
                 model_spec,
                 current_params,
@@ -10658,7 +10669,11 @@ class DeepAgentsApp(App):
                 )
                 return None
             age_seconds = max((datetime.now(UTC) - timestamp).total_seconds(), 0.0)
-            identity_changed = model_spec != last_spec or current_params != last_params
+            identity_changed = (
+                model_spec != last_spec
+                or current_params != last_params
+                or endpoint != last_endpoint
+            )
             if not identity_changed and age_seconds <= policy.window_seconds:
                 return None
             estimate = estimate_rewarm_cost(context_tokens, model_spec, policy)

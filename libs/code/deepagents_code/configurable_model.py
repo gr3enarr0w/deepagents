@@ -56,6 +56,21 @@ class _ResolvedModelRequest:
     """Whether `model_params` is known and should be written to the checkpoint."""
 
 
+def _cache_endpoint_identity(model_spec: str | None) -> str | None:
+    """Resolve the endpoint identity used by a model request for checkpointing.
+
+    Returns:
+        The normalized endpoint identity, or `None` when the provider is unknown.
+    """
+    if not model_spec or ":" not in model_spec:
+        return None
+    from deepagents_code.cold_cache import endpoint_cache_identity
+    from deepagents_code.model_config import ModelConfig
+
+    provider, _, _ = model_spec.partition(":")
+    return endpoint_cache_identity(ModelConfig.load().get_base_url(provider))
+
+
 def _get_ls_provider(model: object) -> str | None:
     """Return the LangSmith provider name reported by a chat model.
 
@@ -587,6 +602,9 @@ def _checkpoint_command(
     # while `ctx.model` still names the rejected override.
     if resolved.model_spec:
         update["_last_cache_model_spec"] = resolved.model_spec
+        endpoint = _cache_endpoint_identity(resolved.model_spec)
+        if endpoint is not None:
+            update["_last_cache_endpoint"] = endpoint
     if resolved.model_spec:
         update["_model_spec"] = resolved.model_spec
     if resolved.model_params_known:
